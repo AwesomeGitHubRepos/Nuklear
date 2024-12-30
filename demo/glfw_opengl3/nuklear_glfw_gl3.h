@@ -26,7 +26,7 @@ enum nk_glfw_init_state{
 
 struct nk_glfw_device {
     struct nk_buffer cmds;
-    struct nk_draw_null_texture null;
+    struct nk_draw_null_texture tex_null;
     GLuint vbo, vao, ebo;
     GLuint prog;
     GLuint vert_shdr;
@@ -53,6 +53,7 @@ struct nk_glfw {
     double last_button_click;
     int is_double_click_down;
     struct nk_vec2 double_click_pos;
+    float delta_time_seconds_last;
 };
 
 NK_API struct nk_context*   nk_glfw3_init(struct nk_glfw* glfw, GLFWwindow *win, enum nk_glfw_init_state);
@@ -78,6 +79,9 @@ NK_API void                 nk_glfw3_mouse_button_callback(GLFWwindow *win, int 
  * ===============================================================
  */
 #ifdef NK_GLFW_GL3_IMPLEMENTATION
+#include <string.h>
+#include <stdlib.h>
+#include <assert.h>
 
 #ifndef NK_GLFW_DOUBLE_CLICK_LO
 #define NK_GLFW_DOUBLE_CLICK_LO 0.02
@@ -240,7 +244,7 @@ nk_glfw3_render(struct nk_glfw* glfw, enum nk_anti_aliasing AA, int max_vertex_b
         /* convert from command queue into draw list and draw to screen */
         const struct nk_draw_command *cmd;
         void *vertices, *elements;
-        const nk_draw_index *offset = NULL;
+        nk_size offset = 0;
 
         /* allocate vertex and element buffer */
         glBindVertexArray(dev->vao);
@@ -266,7 +270,7 @@ nk_glfw3_render(struct nk_glfw* glfw, enum nk_anti_aliasing AA, int max_vertex_b
             config.vertex_layout = vertex_layout;
             config.vertex_size = sizeof(struct nk_glfw_vertex);
             config.vertex_alignment = NK_ALIGNOF(struct nk_glfw_vertex);
-            config.null = dev->null;
+            config.tex_null = dev->tex_null;
             config.circle_segment_count = 22;
             config.curve_segment_count = 22;
             config.arc_segment_count = 22;
@@ -292,8 +296,8 @@ nk_glfw3_render(struct nk_glfw* glfw, enum nk_anti_aliasing AA, int max_vertex_b
                 (GLint)((glfw->height - (GLint)(cmd->clip_rect.y + cmd->clip_rect.h)) * glfw->fb_scale.y),
                 (GLint)(cmd->clip_rect.w * glfw->fb_scale.x),
                 (GLint)(cmd->clip_rect.h * glfw->fb_scale.y));
-            glDrawElements(GL_TRIANGLES, (GLsizei)cmd->elem_count, GL_UNSIGNED_SHORT, offset);
-            offset += cmd->elem_count;
+            glDrawElements(GL_TRIANGLES, (GLsizei)cmd->elem_count, GL_UNSIGNED_SHORT, (const void*) offset);
+            offset += cmd->elem_count * sizeof(nk_draw_index);
         }
         nk_clear(&glfw->ctx);
         nk_buffer_clear(&dev->cmds);
@@ -311,7 +315,7 @@ nk_glfw3_render(struct nk_glfw* glfw, enum nk_anti_aliasing AA, int max_vertex_b
 NK_API void
 nk_glfw3_char_callback(GLFWwindow *win, unsigned int codepoint)
 {
-    struct nk_glfw* glfw = glfwGetWindowUserPointer(win);
+    struct nk_glfw* glfw = (struct nk_glfw *)glfwGetWindowUserPointer(win);
     if (glfw->text_len < NK_GLFW_TEXT_MAX)
         glfw->text[glfw->text_len++] = codepoint;
 }
@@ -319,7 +323,7 @@ nk_glfw3_char_callback(GLFWwindow *win, unsigned int codepoint)
 NK_API void
 nk_gflw3_scroll_callback(GLFWwindow *win, double xoff, double yoff)
 {
-    struct nk_glfw* glfw = glfwGetWindowUserPointer(win);
+    struct nk_glfw* glfw = (struct nk_glfw *)glfwGetWindowUserPointer(win);
     (void)xoff;
     glfw->scroll.x += (float)xoff;
     glfw->scroll.y += (float)yoff;
@@ -328,7 +332,7 @@ nk_gflw3_scroll_callback(GLFWwindow *win, double xoff, double yoff)
 NK_API void
 nk_glfw3_mouse_button_callback(GLFWwindow* win, int button, int action, int mods)
 {
-    struct nk_glfw* glfw = glfwGetWindowUserPointer(win);
+    struct nk_glfw* glfw = (struct nk_glfw *)glfwGetWindowUserPointer(win);
     double x, y;
     NK_UNUSED(mods);
     if (button != GLFW_MOUSE_BUTTON_LEFT) return;
@@ -346,7 +350,7 @@ nk_glfw3_mouse_button_callback(GLFWwindow* win, int button, int action, int mods
 NK_INTERN void
 nk_glfw3_clipboard_paste(nk_handle usr, struct nk_text_edit *edit)
 {
-    struct nk_glfw* glfw = usr.ptr;
+    struct nk_glfw* glfw = (struct nk_glfw*)usr.ptr;
     const char *text = glfwGetClipboardString(glfw->win);
     if (text) nk_textedit_paste(edit, text, nk_strlen(text));
     (void)usr;
@@ -355,7 +359,7 @@ nk_glfw3_clipboard_paste(nk_handle usr, struct nk_text_edit *edit)
 NK_INTERN void
 nk_glfw3_clipboard_copy(nk_handle usr, const char *text, int len)
 {
-    struct nk_glfw* glfw = usr.ptr;
+    struct nk_glfw* glfw = (struct nk_glfw*)usr.ptr;
     char *str = 0;
     if (!len) return;
     str = (char*)malloc((size_t)len+1);
@@ -386,6 +390,8 @@ nk_glfw3_init(struct nk_glfw* glfw, GLFWwindow *win, enum nk_glfw_init_state ini
     glfw->is_double_click_down = nk_false;
     glfw->double_click_pos = nk_vec2(0, 0);
 
+    glfw->delta_time_seconds_last = (float)glfwGetTime();
+
     return &glfw->ctx;
 }
 
@@ -403,7 +409,7 @@ nk_glfw3_font_stash_end(struct nk_glfw* glfw)
     const void *image; int w, h;
     image = nk_font_atlas_bake(&glfw->atlas, &w, &h, NK_FONT_ATLAS_RGBA32);
     nk_glfw3_device_upload_atlas(glfw, image, w, h);
-    nk_font_atlas_end(&glfw->atlas, nk_handle_id((int)glfw->ogl.font_tex), &glfw->ogl.null);
+    nk_font_atlas_end(&glfw->atlas, nk_handle_id((int)glfw->ogl.font_tex), &glfw->ogl.tex_null);
     if (glfw->atlas.default_font)
         nk_style_set_font(&glfw->ctx, &glfw->atlas.default_font->handle);
 }
@@ -415,6 +421,11 @@ nk_glfw3_new_frame(struct nk_glfw* glfw)
     double x, y;
     struct nk_context *ctx = &glfw->ctx;
     struct GLFWwindow *win = glfw->win;
+
+    /* update the timer */
+    float delta_time_now = (float)glfwGetTime();
+    glfw->ctx.delta_time_seconds = delta_time_now - glfw->delta_time_seconds_last;
+    glfw->delta_time_seconds_last = delta_time_now;
 
     glfwGetWindowSize(win, &glfw->width, &glfw->height);
     glfwGetFramebufferSize(win, &glfw->display_width, &glfw->display_height);
@@ -465,7 +476,6 @@ nk_glfw3_new_frame(struct nk_glfw* glfw)
         nk_input_key(ctx, NK_KEY_COPY, 0);
         nk_input_key(ctx, NK_KEY_PASTE, 0);
         nk_input_key(ctx, NK_KEY_CUT, 0);
-        nk_input_key(ctx, NK_KEY_SHIFT, 0);
     }
 
     glfwGetCursorPos(win, &x, &y);

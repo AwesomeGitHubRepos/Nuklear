@@ -394,7 +394,7 @@ nk_textedit_text(struct nk_text_edit *state, const char *text, int total_len)
                                         text+text_len, 1))
             {
                 nk_textedit_makeundo_insert(state, state->cursor, 1);
-                ++state->cursor;
+                state->cursor = NK_MIN(state->cursor + 1, state->string.len);
                 state->has_preferred_x = 0;
             }
         }
@@ -992,7 +992,7 @@ nk_textedit_init_fixed(struct nk_text_edit *state, void *memory, nk_size size)
     nk_str_init_fixed(&state->string, memory, size);
 }
 NK_API void
-nk_textedit_init(struct nk_text_edit *state, struct nk_allocator *alloc, nk_size size)
+nk_textedit_init(struct nk_text_edit *state, const struct nk_allocator *alloc, nk_size size)
 {
     NK_ASSERT(state);
     NK_ASSERT(alloc);
